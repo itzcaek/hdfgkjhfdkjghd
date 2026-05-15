@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Deobfuscator v3 — Forgotten Society</title>
+<style>
+* { box-sizing: border-box; margin: 0; }
+body { background: #0a0a0a; color: #00ff88; font-family: 'Courier New', monospace; padding: 20px; }
+h2 { margin-bottom: 5px; }
+.subtitle { color: #666; font-size: 13px; margin-bottom: 15px; }
+textarea { width: 100%; height: 25vh; background: #111; color: #ccc; border: 1px solid #333; padding: 10px; font-family: monospace; font-size: 11px; resize: vertical; }
+button { padding: 10px 25px; background: linear-gradient(135deg, #00ff88, #00c853); color: #000; border: none; cursor: pointer; font-weight: bold; font-size: 13px; margin: 10px 5px 10px 0; border-radius: 5px; }
+button:hover { opacity: 0.85; }
+button.secondary { background: #222; color: #00ff88; border: 1px solid #00ff8833; }
+.stats { color: #888; margin: 10px 0; font-size: 12px; }
+pre { background: #0d0d0d; color: #ccc; padding: 15px; border: 1px solid #222; overflow: auto; max-height: 55vh; white-space: pre-wrap; word-break: break-all; font-size: 11px; line-height: 1.5; border-radius: 5px; }
+</style>
+</head>
+<body>
+<h2>🔓 JS Deobfuscator v3</h2>
+<div class="subtitle">Выполняет оригинальный код → перехватывает декодер → заменяет все вызовы</div>
+
+<button onclick="fetchFromGitHub()">⬇️ Загрузить с GitHub</button>
+<button onclick="deobfuscate()">🔓 Deobfuscate</button>
+<button class="secondary" onclick="copy()">📋 Копировать</button>
+<button class="secondary" onclick="download()">💾 Скачать .js</button>
+
+<div class="stats" id="stats"></div>
+<textarea id="input" placeholder="Код загрузится автоматически или вставьте вручную..."></textarea>
+<pre id="output"></pre>
+
+<script>
+const GITHUB_URL = 'https://raw.githubusercontent.com/itzcaek/g32423434f/main/index.obf.js.%D0%91%D0%B5%D0%B7%20%D0%BD%D0%B0%D0%B7%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F';
+
+async function fetchFromGitHub() {
+  const s = document.getElementById('stats');
+  s.textContent = '⏳ Загрузка...';
+  try {
+    const r = await fetch(GITHUB_URL);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const code = await r.text();
+    document.getElementById('input').value = code;
+    s.textContent = `✅ Загружено ${(code.length/1024).toFixed(1)} KB`;
+  } catch(e) {
+    s.textContent = '❌ ' + e.message + ' — вставьте вручную';
+  }
+}
+
+function deobfuscate() {
+  const code = document.getElementById('input').value;
+  if (!code.trim()) { alert('Вставьте код!'); return; }
+  const stats = document.getElementById('stats');
+  stats.textContent = '⏳ Анализ...';
+
+  setTimeout(() => {
+    try {
+      // === STEP 1: Find all decoder function names ===
+      // A decoder call: _0xHEX(0xHEX, 'key') or _0xHEX(123, "key")
+      const callPat = /(_0x[a-f0-9]+)\s*\(\s*(?:0x[0-9a-fA-F]+|\d+)\s*,\s*['"][^'"]*?['"]\s*\)/g;
+      const names = new Set();
+      let m;
+      while ((m = callPat.exec(code)) !== null) names.add(m[1]);
+
+      if (names.size === 0) { stats.textContent = '❌ Вызовы декодера не найдены'; return; }
+      console.log('Decoder names:', [...names]);
+
+      // === STEP 2: Execute the code in a real <script> tag ===
+      // The decoder is defined as `var _0x...` which becomes window._0x...
+      // Even if the rest of the code throws DOM errors, the decoder survives.
+
+      // Suppress error popups
+      const oldError = window.onerror;
+      window.onerror = () => true;
+
+      // Clean up any previous run
+      for (const n of names) { try { delete window[n]; } catch {} }
+
+      // Create script and execute
+      const script = document.createElement('script');
+      script.textContent = code;
+      document.head.appendChild(script);
+      document.head.removeChild(script);
+
+      // Restore error handler
+      window.onerror = oldError;
+
+      // === STEP 3: Find which decoder actually works ===
+      let decoder = null;
+      let decoderName = null;
+
+      for (const name of names) {
+        const fn = window[name];
+        if (typeof fn === 'function') {
+          // Test it — find a call in the code and verify
+          const testPat = new RegExp(name + '\\s*\\(\\s*(0x[0-9a-fA-F]+|\\d+)\\s*,\\s*[\'"]([^\'"]*?)[\'"]\\s*\\)');
+          const testMatch = code.match(testPat);
+          if (testMatch) {
+            try {
+              const result = fn(parseInt(testMatch[1]), testMatch[2]);
+              if (typeof result === 'string') {
+                decoder = fn;
+                decoderName = name;
+                console.log('Working decoder:', name, 'test:', result);
+                break;
+              }
+            } catch {}
+          }
+        }
+      }
+
+      if (!decoder) {
+        stats.textContent = '❌ Декодер не найден на window. Проверьте консоль (F12).';
+        return;
+      }
+
+      stats.textContent = `⏳ Замена строк декодером ${decoderName}...`;
+
+      // === STEP 4: Also find aliases like: const _0xLOCAL = _0xMAIN; ===
+      const escapedMain = decoderName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const aliasPat = new RegExp(`(?:const|var|let)\\s+(_0x[a-f0-9]+)\\s*=\\s*${escapedMain}\\s*[,;]`, 'g');
+      const allNames = new Set([decoderName]);
+      while ((m = aliasPat.exec(code)) !== null) allNames.add(m[1]);
+
+      // Check for aliases on window too
+      for (const n of allNames) {
+        const fn = window[n];
+        if (typeof fn === 'function' && !decoder) decoder = fn;
+      }
+
+      // === STEP 5: Replace all decoder calls ===
+      let result = code;
+      let totalCount = 0;
+      let failed = 0;
+
+      for (const name of allNames) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(
+          escaped + '\\s*\\(\\s*(0x[0-9a-fA-F]+|\\d+)\\s*,\\s*[\'"]([^\'"]*?)[\'"]\\s*\\)', 'g'
+        );
+
+        // Try with window[name] decoder (aliases might point to same function)
+        const dec = window[name] || decoder;
+        if (typeof dec !== 'function') continue;
+
+        result = result.replace(re, (match, idx, key) => {
+          try {
+            const decoded = dec(parseInt(idx), key);
+            if (typeof decoded !== 'string') { failed++; return match; }
+            totalCount++;
+            return JSON.stringify(decoded);
+          } catch (e) { failed++; return match; }
+        });
+      }
+
+      // === STEP 6: Concatenate split strings ===
+      for (let i = 0; i < 30; i++) {
+        const prev = result;
+        result = result.replace(/'([^']*?)'\s*\+\s*'([^']*?)'/g, "'$1$2'");
+        result = result.replace(/"([^"]*?)"\s*\+\s*"([^"]*?)"/g, '"$1$2"');
+        if (result === prev) break;
+      }
+
+      // === STEP 7: Bracket to dot notation ===
+      result = result.replace(/\["([a-zA-Z_$][a-zA-Z0-9_$]*)"\]/g, '.$1');
+      result = result.replace(/\['([a-zA-Z_$][a-zA-Z0-9_$]*)'\]/g, '.$1');
+
+      // === STEP 8: Clean up - remove the big string array ===
+      // Find and remove the array declaration (first big const _0x... = [...];)
+      const arrayMatch = code.match(/const\s+(_0x[a-f0-9]+)\s*=\s*\[/);
+      if (arrayMatch) {
+        const arrName = arrayMatch[1];
+        const arrStart = result.indexOf('const ' + arrName + ' =');
+        if (arrStart !== -1) {
+          // Find ]; that ends the array
+          let arrEnd = -1;
+          let inStr = false, strCh = '', esc = false, depth = 0;
+          for (let i = arrStart; i < result.length; i++) {
+            const ch = result[i];
+            if (esc) { esc = false; continue; }
+            if (ch === '\\') { esc = true; continue; }
+            if (inStr) { if (ch === strCh) inStr = false; continue; }
+            if (ch === '"' || ch === "'" || ch === '`') { inStr = true; strCh = ch; continue; }
+            if (ch === '[') depth++;
+            if (ch === ']') { depth--; if (depth === 0) { arrEnd = result.indexOf(';', i) + 1; break; } }
+          }
+          if (arrEnd > arrStart) {
+            result = result.substring(0, arrStart) + '/* [DEOBFUSCATED] string array removed */\n' + result.substring(arrEnd);
+          }
+        }
+      }
+
+      // Remove alias lines like: const _0xLOCAL = _0xMAIN;
+      for (const name of allNames) {
+        const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Remove lines that are just aliases
+        const aliasLine = new RegExp(`(?:const|var|let)\\s+_0x[a-f0-9]+\\s*=\\s*${esc}\\s*;\\s*\\n?`, 'g');
+        result = result.replace(aliasLine, '');
+      }
+
+      // Show
+      document.getElementById('output').style.display = 'block';
+      document.getElementById('output').textContent = result;
+
+      stats.innerHTML = `✅ Декодировано <b style="color:#00ff88">${totalCount}</b> строк` +
+        (failed > 0 ? `, ❌ ${failed} ошибок` : '') +
+        ` | ${(result.length/1024).toFixed(1)} KB`;
+
+      // Clean up window
+      for (const n of allNames) { try { delete window[n]; } catch {} }
+
+    } catch (e) {
+      stats.textContent = '❌ ' + e.message;
+      console.error(e);
+    }
+  }, 200);
+}
+
+function copy() {
+  const t = document.getElementById('output').textContent;
+  if (!t) return;
+  navigator.clipboard.writeText(t).then(() => alert('Скопировано!'));
+}
+
+function download() {
+  const t = document.getElementById('output').textContent;
+  if (!t) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([t], {type:'application/javascript'}));
+  a.download = 'forgotten-deobfuscated.js';
+  a.click();
+}
+
+window.addEventListener('load', () => setTimeout(fetchFromGitHub, 300));
+</script>
+</body>
+</html>
